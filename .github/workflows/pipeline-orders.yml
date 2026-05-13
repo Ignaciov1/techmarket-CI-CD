@@ -1,0 +1,106 @@
+name: TechMarket Orders - CI/CD Pipeline
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: techmarket-orders
+  EKS_CLUSTER: duoc-eks-cluster-cli
+
+jobs:
+  ci-cd-pipeline:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📥 Checkout del código
+        uses: actions/checkout@v4
+
+      # ---------------------------------------------------------
+      # ETAPA 1: VALIDACIÓN / TEST
+      # ---------------------------------------------------------
+      - name: 🧪 Fase de Validación y Test (Pytest)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: |
+          cd app
+          pip install -r requirements.txt
+          pytest tests/
+
+      # ---------------------------------------------------------
+      # CONFIGURACIÓN AWS Y ECR
+      # ---------------------------------------------------------
+      - name: 🔐 Configurar Credenciales AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: 🐳 Iniciar sesión en Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # ---------------------------------------------------------
+      # ETAPA 2: BUILD
+      # ---------------------------------------------------------
+      - name: 🏗️ Fase de Build y Push a ECR
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          cd app
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG -t $ECR_REGISTRY/$ECR_REPOSITORY:latest .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY --all-tags
+
+      # ---------------------------------------------------------
+      # ETAPA 3: DESPLIEGUE EN EKS (CON ACCIONES DEL MARKETPLACE)
+      # ---------------------------------------------------------
+      - name: ☸️ Configurar Contexto de Kubernetes
+        uses: azure/k8s-set-context@v4
+        with:
+          method: kubeconfig
+          kubeconfig: ${{ secrets.KUBECONFIG }}
+
+      # Acción externa del Marketplace solicitada en la pauta
+      - name: 📝 Actualizar Manifiesto YAML dinámicamente (yq Marketplace)
+        uses: mikefarah/yq@v4.44.1
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        with:
+          cmd: yq e -i '(select(fileIndex == 0) | .spec.template.spec.containers[0].image) = env(ECR_REGISTRY) + "/" + env(ECR_REPOSITORY) + ":" + env(IMAGE_TAG)' k8s/orders-deployment.yaml
+
+      - name: 🚀 Fase de Despliegue Automatizado
+        run: |
+          kubectl apply -f k8s/orders-deployment.yaml
+          
+      # ---------------------------------------------------------
+      # ETAPA 4: VERIFICACIÓN POST-DEPLOY
+      # ---------------------------------------------------------
+      - name: 🔍 Fase de Verificación Post-Deploy (Smoke Test)
+        run: |
+          echo "Monitoreando el estado del rollout en el microservicio Orders..."
+          kubectl rollout status deployment/techmarket-orders-api --timeout=60s
+          
+          echo "Verificando pods activos en el clúster:"
+          kubectl get pods -l app=orders-api
+          
+          # Para probar el Rollback Automático ante el profesor, descomenta la siguiente línea:
+          # exit 1
+
+      # ---------------------------------------------------------
+      # ETAPA 5: ROLLBACK AUTOMÁTICO
+      # ---------------------------------------------------------
+      - name: ⚠️ Reversión Automática en Caso de Fallo (Rollback)
+        if: failure()
+        run: |
+          echo "¡Alerta! Falló la verificación post-deploy. Iniciando Rollback automático..."
+          kubectl rollout undo deployment/techmarket-orders-api
+          echo "Rollback completado. El servicio ha regresado a su estado seguro."
+          
+          echo "### 🔴 Despliegue Fallido - Rollback Automático Ejecutado" >> $GITHUB_STEP_SUMMARY
+          echo "El microservicio Orders regresó a su versión estable garantizando continuidad." >> $GITHUB_STEP_SUMMARY
