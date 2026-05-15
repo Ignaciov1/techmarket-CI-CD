@@ -111,3 +111,15 @@ resource "aws_eks_node_group" "workers" {
 
   depends_on = [aws_eks_cluster.main]
 }
+# ---------------------------------------------------------
+# REPOSITORIO DE IMÁGENES (ECR)
+# ---------------------------------------------------------
+resource "aws_ecr_repository" "techmarket_orders" {
+  name                 = "techmarket-orders"
+  image_tag_mutability = "MUTABLE"
+  force_delete        = true
+
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+}
